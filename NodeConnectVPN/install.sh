@@ -24,8 +24,11 @@ EOF
 
 echo -e "${GREEN}Начинаем установку NodeConnectVPN...${NC}"
 
-# 1. Установка системных зависимостей
-echo -e "${CYAN}Обновление пакетов и установка базовых утилит (curl, jq, openssl, git)...${NC}"
+# 1. Установка системных зависимостей и пре-очистка
+echo -e "${CYAN}Очистка возможных старых конфигов и обновление пакетов...${NC}"
+# Удаляем следы прошлых неудачных запусков, чтобы apt-get update не падал
+rm -f /etc/apt/sources.list.d/docker.list
+
 apt-get update -y
 apt-get install -y curl jq openssl ca-certificates gnupg lsb-release git
 
@@ -230,7 +233,7 @@ elif [ "$INSTALL_TYPE" == "2" ]; then
         if [ -d "./node_agent" ]; then
             cp -r ./node_agent/* $BASE_DIR/app/
         else
-            echo -e "${RED}Ошибка: Папка ./node_agent не найдена в текущей директории! Укажите URL репозитория или запустите ВСЕ С КОРНЯ ПРОЕКТА.${NC}"
+            echo -e "${RED}Ошибка: Папка ./node_agent не найдена в текущей директории! Укажите URL репозитория или запустите скрипт из корня проекта.${NC}"
             exit 1
         fi
     fi
@@ -283,4 +286,62 @@ masquerade:
     url: https://bing.com
     rewriteHost: true
 EOF
-    openssl req -x509 -nodes -newkey r
+    openssl req -x509 -nodes -newkey rsa:2048 -keyout hysteria/server.key -out hysteria/server.crt -days 3650 -subj "/CN=bing.com" 2>/dev/null
+
+    echo -e "${CYAN}Сборка docker-compose.yml для Агента (Inline Build)...${NC}"
+    cat << 'EOF' > docker-compose.yml
+version: '3.8'
+
+services:
+  node-agent:
+    image: nodeconnect-agent-backend:latest
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        WORKDIR /app
+        COPY ./app/requirements.txt* /app/
+        RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; else pip install --no-cache-dir fastapi uvicorn pydantic grpcio grpcio-tools aiofiles; fi
+        COPY ./app /app
+    container_name: nodeconnect-agent
+    restart: always
+    network_mode: "host"
+    env_file: .env
+    volumes:
+      - /opt/NodeConnectVPN/agent/xray:/etc/xray
+      - /opt/NodeConnectVPN/agent/hysteria:/etc/hysteria
+    command: uvicorn main:app --host 0.0.0.0 --port 8880
+
+  xray:
+    image: teddysun/xray:latest
+    container_name: nodeconnect-xray
+    restart: always
+    network_mode: "host"
+    volumes:
+      - /opt/NodeConnectVPN/agent/xray:/etc/xray
+
+  hysteria:
+    image: tobyxdd/hysteria:v2
+    container_name: nodeconnect-hysteria
+    restart: always
+    network_mode: "host"
+    command: server -c /etc/hysteria/config.yaml
+    volumes:
+      - /opt/NodeConnectVPN/agent/hysteria:/etc/hysteria
+EOF
+    
+    echo -e "${CYAN}Сборка образов и поднятие стека Агента...${NC}"
+    docker compose up --build -d
+    
+    echo -e "${GREEN}\n==============================================${NC}"
+    echo -e "${GREEN}Установка Кастомного Агента завершена!${NC}"
+    echo -e "Контроллер (Node-Agent) слушает порт: ${YELLOW}8880${NC}"
+    echo -e "Для привязки в Панели используйте IP/Домен: ${NODE_HOST}"
+    echo -e "gRPC API ядра Xray успешно изолирован на порту: ${XRAY_GRPC_PORT}"
+    echo -e "==============================================\n${NC}"
+else
+    echo -e "${RED}Ошибка: Неверный выбор архитектурной роли. Отмена.${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Скрипт завершил работу.${NC}"
