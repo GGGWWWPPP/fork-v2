@@ -26,7 +26,6 @@ echo -e "${GREEN}Начинаем установку NodeConnectVPN...${NC}"
 
 # 1. Установка системных зависимостей и пре-очистка
 echo -e "${CYAN}Очистка возможных старых конфигов и обновление пакетов...${NC}"
-# Удаляем следы прошлых неудачных запусков, чтобы apt-get update не падал
 rm -f /etc/apt/sources.list.d/docker.list
 
 apt-get update -y
@@ -36,12 +35,10 @@ apt-get install -y curl jq openssl ca-certificates gnupg lsb-release git
 if ! command -v docker &> /dev/null; then
     echo -e "${CYAN}Установка Docker Engine...${NC}"
     
-    # Считываем реальные данные ОС
     . /etc/os-release
     OS_ID="${ID}"
     OS_CODENAME="${VERSION_CODENAME}"
 
-    # Если это деривативы, подтягиваем базовую ОС
     if [ "$OS_ID" != "ubuntu" ] && [ "$OS_ID" != "debian" ]; then
         if echo "$ID_LIKE" | grep -q "ubuntu"; then
             OS_ID="ubuntu"
@@ -86,12 +83,10 @@ read -p "Введите ссылку на ваш GitHub/GitLab репозито�
 if [ "$INSTALL_TYPE" == "1" ]; then
     echo -e "\n${CYAN}=== Инициализация Главной Панели (Main Controller) ===${NC}"
     
-    # Интерактивный опрос
     read -p "Введите основной домен панели (например, panel.example.com): " PANEL_DOMAIN
     read -p "Введите саб-домен для подписок (например, sub.example.com): " SUB_DOMAIN
     read -p "Введите Email для SSL сертификата Let's Encrypt: " SSL_EMAIL
     
-    # Генерация криптографических секретов
     SECRET_KEY=$(openssl rand -hex 32)
     BOT_API_TOKEN=$(openssl rand -hex 32)
     AGENT_TOKEN=$(openssl rand -hex 32)
@@ -102,13 +97,23 @@ if [ "$INSTALL_TYPE" == "1" ]; then
     echo -e "${CYAN}Получение исходного кода...${NC}"
     if [ -n "$REPO_URL" ]; then
         git clone "$REPO_URL" /tmp/panel_repo
-        cp -r /tmp/panel_repo/app/* $BASE_DIR/app/
+        # Проверяем, лежит ли папка app в подпапке NodeConnectVPN или в корне
+        if [ -d "/tmp/panel_repo/NodeConnectVPN/app" ]; then
+            cp -r /tmp/panel_repo/NodeConnectVPN/app/* $BASE_DIR/app/
+        elif [ -d "/tmp/panel_repo/app" ]; then
+            cp -r /tmp/panel_repo/app/* $BASE_DIR/app/
+        else
+            echo -e "${RED}Критическая ошибка: Папка 'app' не найдена в репозитории! Check структуры проекта.${NC}"
+            exit 1
+        fi
         rm -rf /tmp/panel_repo
     else
         if [ -d "./app" ]; then
             cp -r ./app/* $BASE_DIR/app/
+        elif [ -d "./NodeConnectVPN/app" ]; then
+            cp -r ./NodeConnectVPN/app/* $BASE_DIR/app/
         else
-            echo -e "${RED}Ошибка: Папка ./app не найдена в текущей директории! Укажите URL репозитория или запустите скрипт из корня проекта.${NC}"
+            echo -e "${RED}Ошибка: Папка app не найдена локально! Запустите из корня проекта или укажите REPO_URL.${NC}"
             exit 1
         fi
     fi
@@ -138,7 +143,7 @@ ${SUB_DOMAIN} {
 }
 EOF
     
-    echo -e "${CYAN}Сборка docker-compose.yml для Панели (Inline Build с фиксом путей)...${NC}"
+    echo -e "${CYAN}Сборка docker-compose.yml для Панели (Inline Build)...${NC}"
     cat << 'EOF' > docker-compose.yml
 version: '3.8'
 
@@ -227,13 +232,23 @@ elif [ "$INSTALL_TYPE" == "2" ]; then
     echo -e "${CYAN}Получение исходного кода...${NC}"
     if [ -n "$REPO_URL" ]; then
         git clone "$REPO_URL" /tmp/agent_repo
-        cp -r /tmp/agent_repo/node_agent/* $BASE_DIR/app/
+        # Проверяем, лежит ли папка node_agent в подпапке NodeConnectVPN или в корне
+        if [ -d "/tmp/agent_repo/NodeConnectVPN/node_agent" ]; then
+            cp -r /tmp/agent_repo/NodeConnectVPN/node_agent/* $BASE_DIR/app/
+        elif [ -d "/tmp/agent_repo/node_agent" ]; then
+            cp -r /tmp/agent_repo/node_agent/* $BASE_DIR/app/
+        else
+            echo -e "${RED}Критическая ошибка: Папка 'node_agent' не найдена в репозитории!${NC}"
+            exit 1
+        fi
         rm -rf /tmp/agent_repo
     else
         if [ -d "./node_agent" ]; then
             cp -r ./node_agent/* $BASE_DIR/app/
+        elif [ -d "./NodeConnectVPN/node_agent" ]; then
+            cp -r ./NodeConnectVPN/node_agent/* $BASE_DIR/app/
         else
-            echo -e "${RED}Ошибка: Папка ./node_agent не найдена в текущей директории! Укажите URL репозитория или запустите скрипт из корня проекта.${NC}"
+            echo -e "${RED}Ошибка: Папка node_agent не найдена локально! Запустите из корня проекта или укажите REPO_URL.${NC}"
             exit 1
         fi
     fi
@@ -252,96 +267,4 @@ EOF
     "log": { "loglevel": "warning" },
     "api": {
         "tag": "api",
-        "services": [ "HandlerService", "LoggerService", "StatsService" ]
-    },
-    "inbounds": [
-        {
-            "listen": "127.0.0.1",
-            "port": ${XRAY_GRPC_PORT},
-            "protocol": "dokodemo-door",
-            "settings": { "address": "127.0.0.1" },
-            "tag": "api-in"
-        }
-    ],
-    "routing": {
-        "rules": [
-            { "inboundTag": ["api-in"], "outboundTag": "api", "type": "field" }
-        ]
-    }
-}
-EOF
-
-    echo -e "${CYAN}Инициализация базовой конфигурации Hysteria 2...${NC}"
-    cat << EOF > hysteria/config.yaml
-listen: :443
-tls:
-  cert: /etc/hysteria/server.crt
-  key: /etc/hysteria/server.key
-auth:
-  type: password
-  password: dummy_password
-masquerade:
-  type: proxy
-  proxy:
-    url: https://bing.com
-    rewriteHost: true
-EOF
-    openssl req -x509 -nodes -newkey rsa:2048 -keyout hysteria/server.key -out hysteria/server.crt -days 3650 -subj "/CN=bing.com" 2>/dev/null
-
-    echo -e "${CYAN}Сборка docker-compose.yml для Агента (Inline Build)...${NC}"
-    cat << 'EOF' > docker-compose.yml
-version: '3.8'
-
-services:
-  node-agent:
-    image: nodeconnect-agent-backend:latest
-    build:
-      context: .
-      dockerfile_inline: |
-        FROM python:3.11-slim
-        WORKDIR /app
-        COPY ./app/requirements.txt* /app/
-        RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; else pip install --no-cache-dir fastapi uvicorn pydantic grpcio grpcio-tools aiofiles; fi
-        COPY ./app /app
-    container_name: nodeconnect-agent
-    restart: always
-    network_mode: "host"
-    env_file: .env
-    volumes:
-      - /opt/NodeConnectVPN/agent/xray:/etc/xray
-      - /opt/NodeConnectVPN/agent/hysteria:/etc/hysteria
-    command: uvicorn main:app --host 0.0.0.0 --port 8880
-
-  xray:
-    image: teddysun/xray:latest
-    container_name: nodeconnect-xray
-    restart: always
-    network_mode: "host"
-    volumes:
-      - /opt/NodeConnectVPN/agent/xray:/etc/xray
-
-  hysteria:
-    image: tobyxdd/hysteria:v2
-    container_name: nodeconnect-hysteria
-    restart: always
-    network_mode: "host"
-    command: server -c /etc/hysteria/config.yaml
-    volumes:
-      - /opt/NodeConnectVPN/agent/hysteria:/etc/hysteria
-EOF
-    
-    echo -e "${CYAN}Сборка образов и поднятие стека Агента...${NC}"
-    docker compose up --build -d
-    
-    echo -e "${GREEN}\n==============================================${NC}"
-    echo -e "${GREEN}Установка Кастомного Агента завершена!${NC}"
-    echo -e "Контроллер (Node-Agent) слушает порт: ${YELLOW}8880${NC}"
-    echo -e "Для привязки в Панели используйте IP/Домен: ${NODE_HOST}"
-    echo -e "gRPC API ядра Xray успешно изолирован на порту: ${XRAY_GRPC_PORT}"
-    echo -e "==============================================\n${NC}"
-else
-    echo -e "${RED}Ошибка: Неверный выбор архитектурной роли. Отмена.${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Скрипт завершил работу.${NC}"
+        "services":
