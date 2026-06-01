@@ -29,12 +29,37 @@ echo -e "${CYAN}Обновление пакетов и установка баз
 apt-get update -y
 apt-get install -y curl jq openssl ca-certificates gnupg lsb-release git
 
-# 2. Установка Docker и плагина Docker Compose (Официальный репозиторий)
+# 2. Установка Docker и плагина Docker Compose (Универсальный метод для Ubuntu/Debian)
 if ! command -v docker &> /dev/null; then
     echo -e "${CYAN}Установка Docker Engine...${NC}"
+    
+    # Считываем реальные данные ОС
+    . /etc/os-release
+    OS_ID="${ID}"
+    OS_CODENAME="${VERSION_CODENAME}"
+
+    # Если это деривативы, подтягиваем базовую ОС
+    if [ "$OS_ID" != "ubuntu" ] && [ "$OS_ID" != "debian" ]; then
+        if echo "$ID_LIKE" | grep -q "ubuntu"; then
+            OS_ID="ubuntu"
+            OS_CODENAME="jammy"
+        elif echo "$ID_LIKE" | grep -q "debian"; then
+            OS_ID="debian"
+            OS_CODENAME="bookworm"
+        else
+            echo -e "${RED}Критическая ошибка: Дистрибутив $OS_ID не поддерживается для авто-установки Docker.${NC}"
+            exit 1
+        fi
+    fi
+
+    echo -e "${CYAN}[DevOps] Найдена ОС: $OS_ID ($OS_CODENAME). Настройка репозитория Docker...${NC}"
+
     mkdir -m 0755 -p /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    rm -f /etc/apt/keyrings/docker.gpg
+    curl -fsSL https://download.docker.com/linux/${OS_ID}/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${OS_ID} ${OS_CODENAME} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    
     apt-get update -y
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 else
@@ -77,7 +102,6 @@ if [ "$INSTALL_TYPE" == "1" ]; then
         cp -r /tmp/panel_repo/app/* $BASE_DIR/app/
         rm -rf /tmp/panel_repo
     else
-        # Если репозиторий не указан, копируем папку app из текущей директории
         if [ -d "./app" ]; then
             cp -r ./app/* $BASE_DIR/app/
         else
@@ -123,7 +147,6 @@ services:
       dockerfile_inline: |
         FROM python:3.11-slim
         WORKDIR /workspace
-        # Копируем requirements и ставим пакеты до копирования основного кода для кэширования слоев
         COPY ./app/requirements.txt* /workspace/app/
         RUN if [ -f /workspace/app/requirements.txt ]; then pip install --no-cache-dir -r /workspace/app/requirements.txt; else pip install --no-cache-dir fastapi uvicorn sqlalchemy asyncpg pydantic redis aiofiles cryptography grpcio grpcio-tools jinja2; fi
         COPY ./app /workspace/app
@@ -204,11 +227,10 @@ elif [ "$INSTALL_TYPE" == "2" ]; then
         cp -r /tmp/agent_repo/node_agent/* $BASE_DIR/app/
         rm -rf /tmp/agent_repo
     else
-        # Если репозиторий не указан, копируем папку node_agent из текущей директории
         if [ -d "./node_agent" ]; then
             cp -r ./node_agent/* $BASE_DIR/app/
         else
-            echo -e "${RED}Ошибка: Папка ./node_agent не найдена в текущей директории! Укажите URL репозитория или запустите скрипт из корня проекта.${NC}"
+            echo -e "${RED}Ошибка: Папка ./node_agent не найдена в текущей директории! Укажите URL репозитория или запустите ВСЕ С КОРНЯ ПРОЕКТА.${NC}"
             exit 1
         fi
     fi
@@ -261,63 +283,4 @@ masquerade:
     url: https://bing.com
     rewriteHost: true
 EOF
-    # Защита от старта без сертификатов (авто-генерация самоподписанных для маскировки)
-    openssl req -x509 -nodes -newkey rsa:2048 -keyout hysteria/server.key -out hysteria/server.crt -days 3650 -subj "/CN=bing.com" 2>/dev/null
-
-    echo -e "${CYAN}Сборка docker-compose.yml для Агента (Inline Build)...${NC}"
-    cat << 'EOF' > docker-compose.yml
-version: '3.8'
-
-services:
-  node-agent:
-    image: nodeconnect-agent-backend:latest
-    build:
-      context: .
-      dockerfile_inline: |
-        FROM python:3.11-slim
-        WORKDIR /app
-        COPY ./app/requirements.txt* /app/
-        RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; else pip install --no-cache-dir fastapi uvicorn pydantic grpcio grpcio-tools aiofiles; fi
-        COPY ./app /app
-    container_name: nodeconnect-agent
-    restart: always
-    network_mode: "host"
-    env_file: .env
-    volumes:
-      - /opt/NodeConnectVPN/agent/xray:/etc/xray
-      - /opt/NodeConnectVPN/agent/hysteria:/etc/hysteria
-    command: uvicorn main:app --host 0.0.0.0 --port 8880
-
-  xray:
-    image: teddysun/xray:latest
-    container_name: nodeconnect-xray
-    restart: always
-    network_mode: "host"
-    volumes:
-      - /opt/NodeConnectVPN/agent/xray:/etc/xray
-
-  hysteria:
-    image: tobyxdd/hysteria:v2
-    container_name: nodeconnect-hysteria
-    restart: always
-    network_mode: "host"
-    command: server -c /etc/hysteria/config.yaml
-    volumes:
-      - /opt/NodeConnectVPN/agent/hysteria:/etc/hysteria
-EOF
-    
-    echo -e "${CYAN}Поднятие стека Агента...${NC}"
-    docker compose up --build -d
-    
-    echo -e "${GREEN}\n==============================================${NC}"
-    echo -e "${GREEN}Установка Кастомного Агента завершена!${NC}"
-    echo -e "Контроллер (Node-Agent) слушает порт: ${YELLOW}8880${NC}"
-    echo -e "Для привязки в Панели используйте IP/Домен: ${NODE_HOST}"
-    echo -e "gRPC API ядра Xray успешно изолирован на порту: ${XRAY_GRPC_PORT}"
-    echo -e "==============================================\n${NC}"
-else
-    echo -e "${RED}Ошибка: Неверный выбор архитектурной роли. Отмена.${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Скрипт завершил работу.${NC}"
+    openssl req -x509 -nodes -newkey r
